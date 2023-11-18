@@ -7,3 +7,7 @@ def employers_list() -> list:
     ]
 
     return employers
+
+
+def hourly_rate():
+    return 52

@@ -15,7 +15,6 @@ import data_handler as dh
 import configuration as cfg
 
 base_path = '/time-management'
-# Create the Flask app
 server = Flask(__name__)
 app = dash.Dash(__name__, suppress_callback_exceptions=True,
                 external_stylesheets=[dbc.themes.BOOTSTRAP],
@@ -43,7 +42,41 @@ with app.server.app_context():
     db.create_all()
 
 
-def get_callback_times():
+def get_entries_between_dates_and_employer(start_date, end_date, employer):
+    with app.server.app_context():  # Establish the application context
+        start_datetime = datetime.strptime(start_date, '%Y-%m-%d')
+        end_datetime = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+
+        # Query the database for entries within the date range and optional employer condition
+        if employer:
+            entries = CreateDBEntry.query.filter(
+                CreateDBEntry.date.between(start_datetime, end_datetime),
+                CreateDBEntry.employer == employer
+            ).all()
+        else:
+            entries = CreateDBEntry.query.filter(CreateDBEntry.date.between(start_datetime, end_datetime)).all()
+
+        return entries
+
+
+def entries_to_dataframe(entries):
+    entries_list = [
+        {
+            'date': entry.date,
+            'start_time': entry.start_time,
+            'end_time': entry.end_time,
+            'break_time': entry.break_time,
+            'total_time': entry.total_time,
+            'employer': entry.employer,
+            'remarks': entry.remarks
+        }
+        for entry in entries
+    ]
+    df_entries = pd.DataFrame(entries_list)
+    return df_entries
+
+
+def get_all_entries():
     create_db_entry = CreateDBEntry.query.all()
     df = pd.DataFrame([(record.date,
                         record.start_time,
@@ -61,6 +94,7 @@ def get_callback_times():
 @app.callback(
     Output('invoice-table', 'data'),
     Output('invoice-table', 'columns'),
+    Output('total-time-sum', 'children'),  # Add an Output for the sum
     Input('filter-button', 'n_clicks'),
     State('date-range-picker', 'start_date'),
     State('date-range-picker', 'end_date'),
@@ -68,74 +102,33 @@ def get_callback_times():
 )
 def update_invoice_table(n_clicks, start_date, end_date, selected_employer):
     if n_clicks is None:
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
 
-    # Convert the input dates to datetime objects
-    start_datetime = datetime.strptime(start_date, '%Y-%m-%d')
-    end_datetime = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)  # Add one day to include end date
+    entries = get_entries_between_dates_and_employer(start_date, end_date, selected_employer)
+    df_filtered = entries_to_dataframe(entries)
 
-    # Query the database for entries within the date range and optional employer condition
-    if selected_employer:
-        entries = CreateDBEntry.query.filter(
-            CreateDBEntry.date.between(start_datetime, end_datetime),
-            CreateDBEntry.employer == selected_employer
-        ).all()
-    else:
-        entries = CreateDBEntry.query.filter(CreateDBEntry.date.between(start_datetime, end_datetime)).all()
+    if df_filtered.empty:  # Check if DataFrame is empty
+        return dash.no_update, dash.no_update, dash.no_update
 
-    # Convert the result to a list of dictionaries for easier use in Dash
-    entries_list = [
-        {
-            'date': entry.date,
-            'start_time': entry.start_time,
-            'end_time': entry.end_time,
-            'break_time': entry.break_time,
-            'total_time': entry.total_time,
-            'employer': entry.employer,
-            'remarks': entry.remarks
-        }
-        for entry in entries
-    ]
+    columns = [{'name': col, 'id': col} for col in df_filtered.columns]
 
-    # Check if entries_list is not empty
-    if not entries_list:
-        return [], []
+    # Calculate the sum of total_time in hours
+    total_time_sum_seconds = df_filtered['total_time'].apply(pd.to_timedelta).dt.total_seconds().sum()
+    total_time_sum_hours = total_time_sum_seconds / 3600
 
-    # Convert columns to the required format for dash_table.DataTable
-    columns = [{'name': col, 'id': col} for col in entries_list[0].keys()]
-    return entries_list, columns
+    total_time_str = f"Total Time Sum: {total_time_sum_hours:.2f} h."
+    employer = df_filtered['employer'].iloc[0]
+    total_pay = round(cfg.hourly_rate() * total_time_sum_hours, 2)
+    hourly_pay = cfg.hourly_rate()
 
+    boxes = html.Div([
+        Styles.kpiboxes('Employer', employer, Styles.greys[0]),
+        Styles.kpiboxes('Total Time Sum', total_time_str, Styles.greys[0]),
+        Styles.kpiboxes('Total Pay', total_pay, Styles.greys[0]),
+        Styles.kpiboxes('Pay per Hour', hourly_pay, Styles.greys[0])
+    ])
 
-def get_entries_between_dates_and_employer(start_date, end_date, employer=None):
-    # Convert the input dates to datetime objects
-    start_datetime = datetime.strptime(start_date, '%Y-%m-%d')
-    end_datetime = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)  # Add one day to include end date
-
-    # Query the database for entries within the date range and optional employer condition
-    if employer:
-        entries = CreateDBEntry.query.filter(
-            CreateDBEntry.date.between(start_datetime, end_datetime),
-            CreateDBEntry.employer == employer
-        ).all()
-    else:
-        entries = CreateDBEntry.query.filter(CreateDBEntry.date.between(start_datetime, end_datetime)).all()
-
-    # Convert the result to a list of dictionaries for easier use in Dash
-    entries_list = [
-        {
-            'id': entry.id,
-            'date': entry.date,
-            'start_time': entry.start_time,
-            'end_time': entry.end_time,
-            'break_time': entry.break_time,
-            'total_time': entry.total_time,
-            'employer': entry.employer,
-            'remarks': entry.remarks
-        }
-        for entry in entries
-    ]
-
-    return entries_list
+    return df_filtered.to_dict('records'), columns, boxes
 
 
 sidebar = html.Div(
@@ -149,6 +142,7 @@ sidebar = html.Div(
                 dbc.NavLink("Home", href=f"{base_path}/", active="exact"),
                 dbc.NavLink("Enter Time", href=f"{base_path}/enter-time", active="exact"),
                 dbc.NavLink("Create Invoice", href=f"{base_path}/invoice-creator", active="exact"),
+                dbc.NavLink("Settings", href=f"{base_path}/settings", active="exact"),
                 dbc.NavLink("About", href=f"{base_path}/about", active="exact"),
             ],
             vertical=True,
@@ -166,7 +160,7 @@ app.layout = html.Div([dcc.Location(id="url"), sidebar, content])
 @app.callback(Output("page-content", "children"), [Input("url", "pathname")])
 def render_page_content(pathname):
     if pathname == f"{base_path}/":
-        df = get_callback_times()
+        df = get_all_entries()
         return html.Div(children=[
             html.H1("Worktime Management", style={'fontSize': '36px', 'fontWeight': 'bold'}),
             html.Hr(),
@@ -258,10 +252,26 @@ def render_page_content(pathname):
             html.Button('Select Your Work Sessions', id='filter-button', className='btn btn-primary'),
             html.Hr(),
             html.H4("Your Work Sessions in selected Period:"),
-            dash_table.DataTable(id='invoice-table'),
-            html.Hr(),
-
+            # dag.AgGrid(id='invoice-table'),  # This is what should be used as soon as possible
+            html.Div([], id='invoice-table'),
+            html.Div(id='total-time-sum'),
+            html.Br(),
+            html.Div([
+                dash_table.DataTable(
+                    id='invoice-table',
+                    style_cell={'minWidth': 95, 'maxWidth': 95, 'width': 95, 'whiteSpace': 'normal', 'maxHeight': 95},
+                    style_data={'whiteSpace': 'normal'},
+                    style_header={
+                        'backgroundColor': 'rgb(240, 240, 240)',
+                        'fontWeight': 'bold'
+                    },
+                    cell_selectable=False,
+                    editable=False,
+                    # Add more styling properties as needed
+                )], style={'width': '100%', 'border-radius': '5px', 'font-family': 'sans', 'height': 'auto'}),
         ])
+    elif pathname == f"{base_path}/settings":
+        return html.Div([])
 
     elif pathname == f"{base_path}/about":
         return html.Div([])

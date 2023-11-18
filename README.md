@@ -1,4 +1,4 @@
-![Alt Text](assets/)
+![Alt Text](assets/Time-Management-App.png)
 
 # Free Time 
 
